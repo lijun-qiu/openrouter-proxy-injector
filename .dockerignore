@@ -1,0 +1,10 @@
+.git
+.github
+.env
+.env.*
+__pycache__
+*.pyc
+docs
+*.md
+docker-compose.yml
+fly.toml
