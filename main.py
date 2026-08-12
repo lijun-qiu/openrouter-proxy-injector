@@ -14,22 +14,103 @@ import asyncio
 import functools
 import random
 
+# Logging setup (early so config errors are visible)
+log_level_name = os.getenv("UVICORN_LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("upstream-proxy")
+
+# Configuration loading
+PROXY_API_KEY = os.getenv("PROXY_API_KEY")
+if not PROXY_API_KEY:
+    logger.error("Error: Environment variable PROXY_API_KEY is not set.")
+    exit(1)
+
+UPSTREAM_BASE_URL = os.getenv(
+    "UPSTREAM_BASE_URL", "https://openrouter.ai/api/v1"
+).rstrip("/")
+IS_OPENROUTER = "openrouter.ai" in UPSTREAM_BASE_URL.lower()
+TIMEZONE = os.getenv("TIMEZONE", "UTC")
+
+try:
+    DEFAULT_KEY_DAILY_LIMIT = int(
+        os.getenv("DEFAULT_KEY_DAILY_LIMIT")
+        or ("50" if IS_OPENROUTER else "125")
+    )
+except ValueError:
+    DEFAULT_KEY_DAILY_LIMIT = 50 if IS_OPENROUTER else 125
+
+try:
+    KEY_MIN_INTERVAL_SECONDS = float(
+        os.getenv("KEY_MIN_INTERVAL_SECONDS")
+        or ("3.0" if IS_OPENROUTER else "0")
+    )
+except ValueError:
+    KEY_MIN_INTERVAL_SECONDS = 3.0 if IS_OPENROUTER else 0.0
+
+
+def parse_keys_config(
+    config_str: str, default_limit: int = 50
+) -> List[Dict]:
+    """Parses the keys configuration string into a list of dictionaries"""
+    keys = []
+    for item in config_str.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            key, limit = item.split(":", 1)
+            try:
+                limit = int(limit)
+            except ValueError:
+                limit = default_limit
+            keys.append({"key": key.strip(), "limit": limit})
+        else:
+            keys.append({"key": item, "limit": default_limit})
+    return keys
+
+
+# UPSTREAM_KEYS preferred; OPENROUTER_KEYS kept for backward compatibility
+_keys_raw = os.getenv("UPSTREAM_KEYS") or os.getenv("OPENROUTER_KEYS", "")
+UPSTREAM_CONFIG = parse_keys_config(_keys_raw, DEFAULT_KEY_DAILY_LIMIT)
+UPSTREAM_KEYS = [k["key"] for k in UPSTREAM_CONFIG]
+# Aliases so existing OpenRouter-oriented names keep working internally
+OPENROUTER_CONFIG = UPSTREAM_CONFIG
+OPENROUTER_KEYS = UPSTREAM_KEYS
+
+if not UPSTREAM_KEYS:
+    logger.error(
+        "Error: Set UPSTREAM_KEYS (or OPENROUTER_KEYS) with at least one API key."
+    )
+    exit(1)
+
+# Initialize key status
+key_status: Dict[str, Optional[pendulum.DateTime]] = {}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initializes the application, API keys, and global HTTP client on startup"""
     global key_status, http_client
-    if not OPENROUTER_KEYS:
-        logger.error("No OPENROUTER_KEYS provided! Exiting...")
+    if not UPSTREAM_KEYS:
+        logger.error("No UPSTREAM_KEYS / OPENROUTER_KEYS provided! Exiting...")
         exit(1)
 
-    key_status = {key: None for key in OPENROUTER_KEYS}
+    key_status = {key: None for key in UPSTREAM_KEYS}
     # max_keepalive_connections: number of idle connections to keep open
     # max_connections: total number of concurrent connections
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
     http_client = httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(300.0))
 
+    profile = "openrouter" if IS_OPENROUTER else "generic"
     logger.info(
-        f"Initialized with {len(OPENROUTER_KEYS)} API keys and global HTTP client"
+        f"Initialized upstream={UPSTREAM_BASE_URL} profile={profile} "
+        f"keys={len(UPSTREAM_KEYS)} default_daily_limit={DEFAULT_KEY_DAILY_LIMIT} "
+        f"min_interval={KEY_MIN_INTERVAL_SECONDS}s timezone={TIMEZONE}"
     )
 
     yield
@@ -43,53 +124,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 http_client: Optional[httpx.AsyncClient] = None
-
-# Logging setup
-log_level_name = os.getenv("UVICORN_LOG_LEVEL", "INFO").upper()
-log_level = getattr(logging, log_level_name, logging.INFO)
-logging.basicConfig(
-    level=log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("openrouter-proxy")
-
-# Configuration loading
-PROXY_API_KEY = os.getenv("PROXY_API_KEY")
-if not PROXY_API_KEY:
-    logger.error("Error: Environment variable PROXY_API_KEY is not set.")
-    exit(1)
-
-
-def parse_keys_config(config_str: str) -> List[Dict]:
-    """Parses the keys configuration string into a list of dictionaries"""
-    keys = []
-    for item in config_str.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if ":" in item:
-            key, limit = item.split(":", 1)
-            try:
-                limit = int(limit)
-            except ValueError:
-                limit = 50
-            keys.append({"key": key.strip(), "limit": limit})
-        else:
-            keys.append({"key": item, "limit": 50})
-    return keys
-
-
-OPENROUTER_CONFIG = parse_keys_config(os.getenv("OPENROUTER_KEYS", ""))
-OPENROUTER_KEYS = [k["key"] for k in OPENROUTER_CONFIG]
-
-if not OPENROUTER_KEYS:
-    logger.error("Error: Environment variable OPENROUTER_KEYS is not set or empty.")
-    exit(1)
-TIMEZONE = os.getenv("TIMEZONE", "UTC")
-
-# Initialize key status
-key_status: Dict[str, Optional[pendulum.DateTime]] = {}
 
 
 def non_streaming_retry():
@@ -175,6 +209,9 @@ def async_retryable(func):
 
                     last_exception = e
                     await asyncio.sleep(random.uniform(0.1, 0.5))
+                elif 400 <= status_code < 500:
+                    # Client/upstream validation errors — do not burn more quota retrying
+                    raise e
                 else:
                     logger.warning(
                         f"Error before stream started: {type(e).__name__}: {e}. Retrying..."
@@ -337,46 +374,46 @@ def log_response_debug(response: httpx.Response, prefix: str = ""):
 
 
 class KeyManager:
-    """Manages OpenRouter API keys, including rotation, rate limiting, and usage tracking"""
+    """Manages upstream API keys, including rotation, rate limiting, and usage tracking"""
 
     def __init__(self):
         self.current_index = 0
-        self.key_configs = {c["key"]: c for c in OPENROUTER_CONFIG}
+        self.key_configs = {c["key"]: c for c in UPSTREAM_CONFIG}
         self.usage_stats = {
             key: {
                 "daily_count": 0,
                 "last_request_at": None,
                 "reset_at": self._get_next_reset(),
             }
-            for key in OPENROUTER_KEYS
+            for key in UPSTREAM_KEYS
         }
 
     def _get_next_reset(self) -> pendulum.DateTime:
-        """Calculates the next daily quota reset time (midnight UTC)"""
-        return pendulum.today("UTC").add(days=1)
+        """Next daily quota reset at midnight in TIMEZONE (UTC for OpenRouter, Asia/Shanghai for ModelScope)."""
+        return pendulum.today(TIMEZONE).add(days=1)
 
     def _check_and_reset_quotas(self):
         """Checks if quotas need to be reset based on the current time"""
-        now_utc = pendulum.now("UTC")
-        for key in OPENROUTER_KEYS:
-            if now_utc >= self.usage_stats[key]["reset_at"]:
+        now = pendulum.now(TIMEZONE)
+        for key in UPSTREAM_KEYS:
+            if now >= self.usage_stats[key]["reset_at"]:
                 logger.info(f"Resetting daily quota for key {key[:14]}...")
                 self.usage_stats[key]["daily_count"] = 0
                 self.usage_stats[key]["reset_at"] = self._get_next_reset()
-                if key_status.get(key) and key_status[key] > pendulum.now(TIMEZONE):
+                if key_status.get(key) and key_status[key] > now:
                     # If it was blocked until midnight, clear it
                     key_status[key] = None
 
     def get_available_key(self) -> Optional[str]:
         """Selects an available API key based on capacity and rate limits"""
-        if not OPENROUTER_KEYS:
+        if not UPSTREAM_KEYS:
             return None
 
         self._check_and_reset_quotas()
         current_time = pendulum.now(TIMEZONE)
 
         candidates = []
-        for key in OPENROUTER_KEYS:
+        for key in UPSTREAM_KEYS:
             # 1. Check if blocked by 429/402
             lock_time = key_status.get(key)
             if lock_time and current_time < lock_time:
@@ -389,12 +426,12 @@ class KeyManager:
             if stats["daily_count"] >= config["limit"]:
                 continue
 
-            # 3. Check RPM (20 requests per minute = 1 request every 3 seconds)
-            if stats["last_request_at"]:
+            # 3. Optional min interval (OpenRouter free: ~20 RPM => 3s)
+            if KEY_MIN_INTERVAL_SECONDS > 0 and stats["last_request_at"]:
                 seconds_since_last = (
                     current_time - stats["last_request_at"]
                 ).total_seconds()
-                if seconds_since_last < 3.0:
+                if seconds_since_last < KEY_MIN_INTERVAL_SECONDS:
                     continue
 
             # Calculate priority: percentage of remaining quota
@@ -452,6 +489,19 @@ class KeyManager:
             except json.decoder.JSONDecodeError:
                 error_content = None
 
+            # Non-OpenRouter upstreams: treat 429 as daily quota exhaustion by default
+            if not IS_OPENROUTER:
+                if response.status_code == 429:
+                    self.block_key_until_next_day(key)
+                    logger.warning(
+                        f"Key {key[:14]}... upstream 429 — blocked until next day ({TIMEZONE})"
+                    )
+                else:
+                    logger.warning(
+                        f"Key {key[:14]}... received status {response.status_code}"
+                    )
+                return
+
             if error_content and isinstance(error_content, dict):
                 error_data = error_content.get("error", {})
                 error_message = (
@@ -465,7 +515,7 @@ class KeyManager:
                     else None
                 )
 
-                if str(error_code) == "429":
+                if str(error_code) == "429" or response.status_code == 429:
                     if (
                         "free-models-per-day" in error_message
                         or "Credits exhausted" in error_message
@@ -493,9 +543,16 @@ class KeyManager:
                         f"Key {key[:14]}... received error {error_code}: {error_message}"
                     )
             else:
-                logger.warning(
-                    f"Key {key[:14]}... received status {response.status_code}. Response body is not JSON."
-                )
+                if response.status_code == 429:
+                    unlock_time = pendulum.now(TIMEZONE).add(seconds=10)
+                    key_status[key] = unlock_time
+                    logger.warning(
+                        f"Key {key[:14]}... received 429 without JSON body. Blocked for 10s."
+                    )
+                else:
+                    logger.warning(
+                        f"Key {key[:14]}... received status {response.status_code}. Response body is not JSON."
+                    )
 
         except Exception as e:
             logger.error(f"Unexpected error handling rate limit response: {str(e)}")
@@ -504,7 +561,7 @@ class KeyManager:
         """Returns the current status and usage statistics for all API keys"""
         current_time = pendulum.now(TIMEZONE)
         statuses = {}
-        for key in OPENROUTER_KEYS:
+        for key in UPSTREAM_KEYS:
             lock_time = key_status.get(key)
             stats = self.usage_stats[key]
             config = self.key_configs[key]
@@ -593,7 +650,7 @@ async def forward_streaming(
                     error_detail = f"Failed to read error body: {str(e)}"
 
                 logger.error(
-                    f"[{masked_key_str}] OpenRouter error: {response.status_code} - {error_detail}"
+                    f"[{masked_key_str}] Upstream error: {response.status_code} - {error_detail}"
                 )
                 raise HTTPException(
                     status_code=response.status_code, detail=error_detail
@@ -612,7 +669,7 @@ async def forward_streaming(
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except httpx.RequestError as e:
         logger.error(f"[{masked_key_str}] Request failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="OpenRouter API unavailable")
+        raise HTTPException(status_code=500, detail="Upstream API unavailable")
 
 
 @app.api_route(
@@ -624,8 +681,8 @@ async def proxy_request(
     authorization: Annotated[Optional[str], Header(alias="Authorization")] = None,
     apikey: Annotated[Optional[str], Header(alias="APIKEY")] = None,
 ):
-    """Main proxy endpoint that forwards requests to OpenRouter with key management and retries"""
-    # Handle CORS preflight requests locally and don't forward them to OpenRouter
+    """Main proxy endpoint that forwards requests upstream with key management and retries"""
+    # Handle CORS preflight requests locally and don't forward them upstream
     if request.method == "OPTIONS":
         return Response(
             status_code=200,
@@ -653,8 +710,7 @@ async def proxy_request(
     is_streaming = False
     body_bytes = await request.body()
 
-    # Only allow streaming for specific endpoints and if requested in the body
-    # OpenRouter supports streaming only for chat/completions and completions
+    # Streaming for chat/completions and completions when requested in the body
     if request.method == "POST" and (path.endswith("completions")):
         try:
             if body_bytes:
@@ -663,11 +719,32 @@ async def proxy_request(
         except json.JSONDecodeError:
             logger.warning("Failed to parse request body as JSON")
 
-    # Prepare request to OpenRouter
-    openrouter_url = f"https://openrouter.ai/api/v1/{path}"
+    # Prepare request to upstream (OpenRouter, ModelScope, or any OpenAI-compatible API)
+    upstream_url = f"{UPSTREAM_BASE_URL}/{path}"
     params = dict(request.query_params)
 
     start_time = time.time()
+
+    def build_upstream_headers(
+        selected_key: str, *, streaming: bool
+    ) -> Dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {selected_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream" if streaming else "application/json",
+        }
+        if IS_OPENROUTER:
+            headers["X-Title"] = "OpenrouterProxy"
+            if streaming:
+                headers["Origin"] = "https://openrouter.ai"
+                headers["Referer"] = "https://openrouter.ai"
+                headers["User-Agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0"
+                )
+        else:
+            headers["X-Title"] = "UpstreamProxy"
+        return headers
 
     # For streaming requests, use special handling
     if is_streaming:
@@ -676,25 +753,17 @@ async def proxy_request(
             logger.error("All API keys are rate limited")
             raise HTTPException(
                 status_code=429,
-                detail="All API keys are rate limited. Try after 03:00 UTC.",
+                detail="All API keys are rate limited.",
             )
 
         masked_key_str = mask_key(selected_key)
         logger.info(
-            f"[{masked_key_str}] Forwarding request to OpenRouter: {request.method} {openrouter_url}"
+            f"[{masked_key_str}] Forwarding request upstream: {request.method} {upstream_url}"
         )
         logger.debug(f"[{masked_key_str}] Streaming: {is_streaming}")
         logger.debug(f"[{masked_key_str}] Request body: {body_bytes.decode('utf-8')}")
 
-        # Create headers for OpenRouter
-        openrouter_headers = {
-            "Authorization": f"Bearer {selected_key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "Origin": "https://openrouter.ai",
-            "Referer": "https://openrouter.ai",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
-        }
+        upstream_headers = build_upstream_headers(selected_key, streaming=True)
 
         async def streaming_generator():
             nonlocal start_time
@@ -711,8 +780,8 @@ async def proxy_request(
                 async for chunk in forward_streaming(
                     client=http_client,
                     method=request.method,
-                    url=openrouter_url,
-                    headers=openrouter_headers,
+                    url=upstream_url,
+                    headers=upstream_headers,
                     content=body_bytes,
                     params=params,
                     selected_key=selected_key,
@@ -720,7 +789,7 @@ async def proxy_request(
                     if start_time:
                         duration = time.time() - start_time
                         logger.info(
-                            f"[{mask_key(selected_key)}] OpenRouter response: 200 (Streaming started) in {duration:.2f}s"
+                            f"[{mask_key(selected_key)}] Upstream response: 200 (Streaming started) in {duration:.2f}s"
                         )
                         start_time = None  # Only log once
                     yield chunk
@@ -728,7 +797,7 @@ async def proxy_request(
                 if start_time:
                     duration = time.time() - start_time
                     logger.info(
-                        f"[{masked_key_str}] OpenRouter response: {e.status_code} in {duration:.2f}s"
+                        f"[{masked_key_str}] Upstream response: {e.status_code} in {duration:.2f}s"
                     )
 
                 error_data = json.dumps(
@@ -745,7 +814,7 @@ async def proxy_request(
                 if start_time:
                     duration = time.time() - start_time
                     logger.info(
-                        f"[{masked_key_str}] OpenRouter response: 500 in {duration:.2f}s"
+                        f"[{masked_key_str}] Upstream response: 500 in {duration:.2f}s"
                     )
 
                 logger.error(f"[{masked_key_str}] Unexpected error: {str(e)}")
@@ -787,22 +856,17 @@ async def proxy_request(
 
         masked_key_str = mask_key(selected_key)
         logger.info(
-            f"[{masked_key_str}] Forwarding request to OpenRouter: {request.method} {openrouter_url}"
+            f"[{masked_key_str}] Forwarding request upstream: {request.method} {upstream_url}"
         )
         logger.debug(f"[{masked_key_str}] Streaming: {is_streaming}")
         logger.debug(f"[{masked_key_str}] Request body: {body_bytes.decode('utf-8')}")
 
-        headers = {
-            "Authorization": f"Bearer {selected_key}",
-            "X-Title": "OpenrouterProxy",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        headers = build_upstream_headers(selected_key, streaming=False)
 
         response = await make_openrouter_request(
             client=http_client,
             method=request.method,
-            url=openrouter_url,
+            url=upstream_url,
             headers=headers,
             content=body_bytes,
             params=params,
@@ -810,7 +874,7 @@ async def proxy_request(
         )
 
         if not response:
-            raise HTTPException(status_code=502, detail="OpenRouter request failed")
+            raise HTTPException(status_code=502, detail="Upstream request failed")
 
         log_response_debug(response, prefix=masked_key_str)
 
@@ -833,7 +897,7 @@ async def proxy_request(
             response = await make_openrouter_request(
                 client=http_client,
                 method=request.method,
-                url=openrouter_url,
+                url=upstream_url,
                 headers=headers,
                 content=body_bytes,
                 params=params,
@@ -845,14 +909,14 @@ async def proxy_request(
 
         if not response:
             raise HTTPException(
-                status_code=502, detail="OpenRouter request failed after retries"
+                status_code=502, detail="Upstream request failed after retries"
             )
 
         content = response.content
 
         duration = time.time() - start_time
         logger.info(
-            f"[{masked_key_str}] OpenRouter response: {response.status_code} in {duration:.2f}s"
+            f"[{masked_key_str}] Upstream response: {response.status_code} in {duration:.2f}s"
         )
         logger.debug(f"[{masked_key_str}] Response body: {content[:500]}...")
 
@@ -887,10 +951,10 @@ async def proxy_request(
         # Note: selected_key might not be defined if get_available_key failed,
         # but we are inside the try block after it succeeded.
         logger.info(
-            f"[{masked_key_str}] OpenRouter response: RequestError in {duration:.2f}s"
+            f"[{masked_key_str}] Upstream response: RequestError in {duration:.2f}s"
         )
         logger.error(f"[{masked_key_str}] Request failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="OpenRouter API unavailable")
+        raise HTTPException(status_code=500, detail="Upstream API unavailable")
 
 
 class KeyStatusResponse(BaseModel):

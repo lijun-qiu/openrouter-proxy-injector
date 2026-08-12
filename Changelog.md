@@ -2,8 +2,14 @@
 
 ## [Unreleased - available on :latest tag for docker image]
 ### Changed
+- Upstream URL is now configurable via `UPSTREAM_BASE_URL` (defaults to OpenRouter). OpenRouter-specific rate-limit parsing and headers remain when the URL hosts `openrouter.ai`.
+- Daily quota reset uses `TIMEZONE` midnight (keep `UTC` for OpenRouter; use `Asia/Shanghai` for ModelScope).
 
 ### Added
+- Generic OpenAI-compatible upstream support (e.g. ModelScope) via `UPSTREAM_BASE_URL` + `UPSTREAM_KEYS`.
+- `OPENROUTER_KEYS` remains supported as an alias for `UPSTREAM_KEYS`.
+- `DEFAULT_KEY_DAILY_LIMIT` and `KEY_MIN_INTERVAL_SECONDS` (auto defaults: OpenRouter 50/3s; other upstreams 125/0s).
+- `.env.modelscope.sample` for running a second ModelScope instance without changing OpenRouter config.
 
 ## [0.1.0]
 ### Changed

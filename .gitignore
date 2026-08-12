@@ -1,5 +1,8 @@
 # Environment
 .env
+.env.*
+!.env.sample
+!.env.*.sample
 
 # Python
 __pycache__/

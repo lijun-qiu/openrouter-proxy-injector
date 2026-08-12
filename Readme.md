@@ -58,11 +58,17 @@ https://github.com/user-attachments/assets/cb1afbaa-def3-47cc-85ba-622872e2f501
 |ENV variable|Type|Required|Default|Description|
 |------------|----|--------|-------|-----------|
 |PROXY_API_KEY|String|True|EMPTY|Your custom unified API key for handling your requests|
-|OPENROUTER_KEYS|String|True|EMPTY|OpenRouter API Keys. Supports optional limits: `key1:50,key2:1000,key3`. Defaults to 50.|
-|TIMEZONE|String|False|UTC|Timezone for handling daily API usage limits for free models. Used to reset limited and locked keys.|
+|UPSTREAM_KEYS|String|True*|EMPTY|Upstream API keys. Optional limits: `key1:50,key2:125`. Alias: `OPENROUTER_KEYS`.|
+|OPENROUTER_KEYS|String|True*|EMPTY|Backward-compatible alias for `UPSTREAM_KEYS`.|
+|UPSTREAM_BASE_URL|String|False|`https://openrouter.ai/api/v1`|Any OpenAI-compatible base (e.g. ModelScope `https://api-inference.modelscope.cn/v1`). OpenRouter-specific rate-limit logic applies only when the host contains `openrouter.ai`.|
+|DEFAULT_KEY_DAILY_LIMIT|Int|False|50 / 125|Default daily limit when a key has no `:limit`. Auto: 50 for OpenRouter, 125 otherwise.|
+|KEY_MIN_INTERVAL_SECONDS|Float|False|3 / 0|Min seconds between requests per key. Auto: 3 for OpenRouter (~20 RPM), 0 otherwise.|
+|TIMEZONE|String|False|UTC|Timezone for daily quota reset and key locks. Use `Asia/Shanghai` for ModelScope.|
 |UVICORN_PORT|Int|False|9999|Default app port to listen|
 |UVICORN_HOST|String|False|0.0.0.0|Default app IP to listen|
-|UVICORN_LOG_LEVEL|String|False|info|Set logging level. E.g. `debug` for showing request details, including body and responses. OpenRouter API Keys are obfuscated in debug logs.|
+|UVICORN_LOG_LEVEL|String|False|info|Set logging level. E.g. `debug` for showing request details, including body and responses. API Keys are obfuscated in debug logs.|
+
+\* One of `UPSTREAM_KEYS` or `OPENROUTER_KEYS` is required.
 
 # Quickstart with Docker
 

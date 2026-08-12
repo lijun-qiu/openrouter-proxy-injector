@@ -1,8 +1,19 @@
 services:
-  openrouter-proxy-injector:
+  openrouter-proxy:
     image: ghcr.io/serjs/openrouter-proxy-injector
+    build: .
     env_file:
       - .env
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-9999}:8000"
+    restart: unless-stopped
+
+  # ModelScope / 魔搭 — separate instance, does not share OpenRouter keys or quotas
+  modelscope-proxy:
+    image: ghcr.io/serjs/openrouter-proxy-injector
+    build: .
+    env_file:
+      - .env.modelscope
+    ports:
+      - "${MODELSCOPE_PORT:-10001}:8000"
     restart: unless-stopped

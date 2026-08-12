@@ -26,7 +26,7 @@ if errorlevel 1 (
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9999/docs' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
 if %errorlevel%==0 (
   echo [OK] Already running: http://127.0.0.1:9999
-  start "" "http://127.0.0.1:9999/docs"
+  if /i not "%SKIP_DOCS%"=="1" start "" "http://127.0.0.1:9999/docs"
   pause
   exit /b 0
 )
@@ -41,8 +41,8 @@ if "%PROXY_API_KEY%"=="" (
   pause
   exit /b 1
 )
-if "%OPENROUTER_KEYS%"=="" (
-  echo [ERROR] OPENROUTER_KEYS is empty in .env
+if "%UPSTREAM_KEYS%"=="" if "%OPENROUTER_KEYS%"=="" (
+  echo [ERROR] UPSTREAM_KEYS or OPENROUTER_KEYS is empty in .env
   pause
   exit /b 1
 )
@@ -55,7 +55,10 @@ echo Close this window to stop the proxy.
 echo ================================
 echo.
 
-start "" cmd /c "timeout /t 3 /nobreak >nul & start http://127.0.0.1:9999/docs"
+REM Avoid opening a second docs tab when launched from 一键启动.bat
+if /i not "%SKIP_DOCS%"=="1" (
+  start "" cmd /c "timeout /t 3 /nobreak >nul & start http://127.0.0.1:9999/docs"
+)
 
 python -m uvicorn main:app --host 0.0.0.0 --port 9999
 set ERR=%errorlevel%
