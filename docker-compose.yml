@@ -1,19 +1,37 @@
 services:
   openrouter-proxy:
-    image: ghcr.io/serjs/openrouter-proxy-injector
-    build: .
+    image: openrouter-proxy-injector:local
+    build:
+      context: .
+      dockerfile: Dockerfile.local
     env_file:
       - .env
     ports:
-      - "${APP_PORT:-9999}:8000"
+      - "${OPENROUTER_PORT:-9999}:8000"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 8s
 
   # ModelScope / 魔搭 — separate instance, does not share OpenRouter keys or quotas
+  # Start only this service: docker compose up -d modelscope-proxy
+  # Host port: MODELSCOPE_PORT (default 10001). Do not reuse APP_PORT from .env.
   modelscope-proxy:
-    image: ghcr.io/serjs/openrouter-proxy-injector
-    build: .
+    image: openrouter-proxy-injector:local
+    build:
+      context: .
+      dockerfile: Dockerfile.local
     env_file:
       - .env.modelscope
     ports:
       - "${MODELSCOPE_PORT:-10001}:8000"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 8s

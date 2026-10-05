@@ -19,7 +19,7 @@ It’s ideal for "Vibe coding", intensive AI agent usage, or simply developing w
 
 # Features
 
-- **Smart Key Rotation**: Uses a quota-aware strategy to prioritize keys with the most remaining daily capacity.
+- **Smart Key Rotation**: Sticky key usage — keep the current key while it is available; when it is blocked or exhausted, switch to the key with the highest remaining daily quota and stick to that one.
 - **Mixed Key Support**: Use different billing API keys for your agent swarm (supports both free and paid keys).
 - **Daily Quota Management**: Manage limits of 50 or 1000 free model requests per day for each API account, enabling nearly unlimited use of Free models through multiple accounts.
 - **Proactive Throttling**: Automatically respects the 20 requests-per-minute limit per key to avoid 429 errors.

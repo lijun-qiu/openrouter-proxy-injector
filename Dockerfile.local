@@ -1,0 +1,25 @@
+# Uses locally cached node:22-slim (Debian 12 / Python 3.11).
+# Avoids docker.io/library/python and Alpine 3.14 (no pydantic_core wheels).
+FROM node:22-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir --break-system-packages \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        -r requirements.txt
+
+COPY main.py .
+
+ENV PYTHONUNBUFFERED=1
+ENV UVICORN_HOST=0.0.0.0
+EXPOSE 8000
+CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -4,12 +4,17 @@
 ### Changed
 - Upstream URL is now configurable via `UPSTREAM_BASE_URL` (defaults to OpenRouter). OpenRouter-specific rate-limit parsing and headers remain when the URL hosts `openrouter.ai`.
 - Daily quota reset uses `TIMEZONE` midnight (keep `UTC` for OpenRouter; use `Asia/Shanghai` for ModelScope).
+- Split one-click launchers: `一键启动.bat` starts OpenRouter only; `一键启动-魔搭.bat` starts ModelScope only.
+- ModelScope one-click prefers Docker Compose (`modelscope-proxy`, `restart: unless-stopped`) so closing the CMD window no longer kills the proxy; falls back to local Python if Docker is unavailable.
+- 429/403 retries are at most once per upstream key (no double-tries on the same key).
+- Dashboard at `/dashboard` shows remaining quotas; `/api/test-key` and `/api/test-keys` live-check upstream keys.
+- Key rotation is sticky: keep the active key while usable; on switch, pick the key with the highest remaining daily quota.
 
 ### Added
 - Generic OpenAI-compatible upstream support (e.g. ModelScope) via `UPSTREAM_BASE_URL` + `UPSTREAM_KEYS`.
 - `OPENROUTER_KEYS` remains supported as an alias for `UPSTREAM_KEYS`.
-- `DEFAULT_KEY_DAILY_LIMIT` and `KEY_MIN_INTERVAL_SECONDS` (auto defaults: OpenRouter 50/3s; other upstreams 125/0s).
-- `.env.modelscope.sample` for running a second ModelScope instance without changing OpenRouter config.
+- Streaming upstream read timeout raised from 10s to 300s (free Ultra models often idle >10s before first SSE chunk).
+- Rotate keys on upstream `403` (e.g. OpenRouter key limit exceeded), not only 429/402.
 
 ## [0.1.0]
 ### Changed
